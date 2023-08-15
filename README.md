@@ -17,6 +17,22 @@ The sample terraform deployment will create a Single-AZ Amazon FSx for NetApp ON
   - creator
   - environment
 
+## Sample terraform.tfvars
+```ini 
+creator_tag           = "<Creator Tag>"
+environment           = "Demo"
+aws_location          = "<AWS Region>"
+availability_zones    = ["<Availability Zone 1>", "<Availability Zone 2>"]
+ec2_instance_type     = "t3.2xlarge"
+ec2_instance_keypair  = "<EC2 Instance Key Pair>"
+ec2_iam_role          = "<IAM Role>"
+fsxn_password         = "<Password for fsxadmin>"
+volume_security_style = "MIXED"
+vpc_cidr              = "10.0.0.0/16"
+public_subnets_cidr   = ["10.0.0.0/20", "10.0.16.0/20"]
+private_subnets_cidr  = ["10.0.128.0/20", "10.0.144.0/20"]
+```
+
 #### EC2 IAM Role
 
 The role is required to fetch the password for fsxadmin from SSM Secured Parameters. Terraform creates an SSM Paramter which is retrieved via the powershell script of EC2 instance. The role allows the retrieval of the parameter and execute the necessary operations on the filesystem.
