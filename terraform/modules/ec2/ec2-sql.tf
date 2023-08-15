@@ -2,7 +2,7 @@ module "sqlserver" {
   source  = "terraform-aws-modules/ec2-instance/aws"
   version = "5.2.1"
 
-  for_each = toset(["Production"])
+  for_each = toset(["Demo"])
 
   name = "${var.creator_tag}-SQL-${each.key}"
 
