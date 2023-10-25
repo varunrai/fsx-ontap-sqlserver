@@ -14,8 +14,84 @@ module "sqlserver" {
   ami                    = data.aws_ami.windows-sql-server.id
   iam_instance_profile   = var.ec2_iam_role
 
+  root_block_device = {
+    volume_type = "gp2"
+    volume_size = 150
+  }
+
   user_data = <<EOT
     <powershell>
+      Function CreateDisk([string]$Drive, [string]$DriveLabel) {
+          Set-Disk -UniqueId $disk.UniqueId -IsOffline $false 
+          Set-Disk -UniqueId $disk.UniqueId -IsReadOnly $false 
+                            
+          if($disk.PartitionStyle -ne "MBR") {
+              Initialize-Disk -PartitionStyle MBR -UniqueId $disk.UniqueId
+              New-Partition -DiskId $disk.UniqueId -UseMaximumSize -DriveLetter $Drive 
+              $NewVol = Format-Volume -DriveLetter $Drive -FileSystem NTFS -NewFileSystemLabel $DriveLabel -AllocationUnitSize 655336 -Confirm:$false 
+                              
+              if($NewVol.HealthStatus -eq "Healthy" -and $NewVol.OperationalStatus -eq "OK") {
+                  Write-Host "New $DriveLabel Volume is created successfully and operational"
+              }
+          }
+      } 
+
+      Function InstallSampleDatabase([string]$DataDrive,[string]$LogDrive) {
+        $sampleDatabaseName = "StackOverflow"
+        Write-Host "Installing Sample Database"
+        if(!(Get-DbaDatabase -SqlInstance localhost -Database $sampleDatabaseName))
+        {
+            try
+            {
+                if(!(Test-Path -Path "${DataDrive}:\SO.7z")) {
+                    Write-Host "Downloading Sample Database"
+                    Start-BitsTransfer -Source "https://downloads.brentozar.com/StackOverflow2013_201809117.7z" -Destination "${DataDrive}:\SO.7z" -Confirm:$false -ErrorAction SilentlyContinue
+                    try {
+                        if(!(Test-Path -Path "C:\Program Files\7-zip\7z.exe")) {
+                            Write-Host "Downloading 7zip"
+                            $dlurl = 'https://7-zip.org/' + (Invoke-WebRequest -UseBasicParsing -Uri 'https://7-zip.org/' | Select-Object -ExpandProperty Links | Where-Object {($_.outerHTML -match 'Download')-and ($_.href -like "a/*") -and ($_.href -like "*-x64.exe")} | Select-Object -First 1 | Select-Object -ExpandProperty href)
+                            $installerPath = Join-Path "${DataDrive}:\" (Split-Path $dlurl -Leaf)
+                            Invoke-WebRequest $dlurl -OutFile $installerPath
+                            Start-Process -FilePath $installerPath -Args "/S" -Verb RunAs -Wait
+                        }
+                    } 
+                    catch {
+                        Write-Host "An error occured during download or installation of 7zip"
+                        Write-Host $_
+                    }
+                }
+
+                try {
+                    Write-Host "Downloading Database from Archive"
+                    & 'C:\Program Files\7-Zip\7z.exe' x "${DataDrive}:\SO.7z" -o"${DataDrive}:\" -y
+                    & mv "${DataDrive}:\StackOverflow2013_log.ldf" "${LogDrive}:\"
+                } catch {
+                    Write-Host "An error occured during extraction of sample database or move"
+                    Write-Host $_
+                }
+
+                try {
+                    $fileStructure = New-Object System.Collections.Specialized.StringCollection
+                    $filestructure.Add("${DataDrive}:\StackOverflow2013_1.mdf")
+                    $filestructure.Add("${DataDrive}:\StackOverflow2013_2.ndf")
+                    $filestructure.Add("${DataDrive}:\StackOverflow2013_3.ndf")
+                    $filestructure.Add("${DataDrive}:\StackOverflow2013_4.ndf")
+                    $filestructure.Add("${LogDrive}:\StackOverflow2013_log.ldf")
+                    Mount-DbaDatabase -SqlInstance localhost -Database StackOverflow -FileStructure $fileStructure -WarningAction Continue
+                    Write-Host "Installing Sample Database Completed"
+                } catch {
+                    Write-Host "Failed to mount sample database!"
+                    Write-Host $_
+                }
+            }
+            catch {
+                Write-Host "Failed to download sample database!"
+                Write-Host $_
+            }
+        } 
+      } 
+
+
       Write-Host "Starting EC2 Configuration for SQL Server and FSxN"
       Start-Service MSiSCSI
       Set-Service -Name msiscsi -StartupType Automatic 
@@ -31,12 +107,14 @@ module "sqlserver" {
       $DataLunPath = "/vol/${var.fsxn_volume_name}/sqldata"
       $LogLunPath = "/vol/${var.fsxn_volume_name}/sqllog"
       $InitiatorGroup = "SQLServer"
-      $LunSize = "200GB"
+      $DataLunSize = "500GB"
+      $LogLunSize = "500GB"
 
       $iSCSIAddress1 ="${var.fsxn_iscsi_ips[0]}"
       $iSCSIAddress2 = "${var.fsxn_iscsi_ips[1]}"
       $DataDirDrive = "D"
       $LogDirDrive = "E"
+      $iSCSISessionsPerTarget = 5
       
       Write-Host "Installing Nuget Provider"
       if((Get-PackageProvider -Name NuGet -Force).Version -lt "2.8.5.208") {
@@ -83,6 +161,13 @@ module "sqlserver" {
         $Cluster = Get-NcCluster -Controller $Array
 
         $SVM = Get-NcVserver -Controller $Array -Name $SvmName
+
+        Set-NcVolOption -Name vol1 -Controller $Array -VserverContext $SVM -Key "fractional_reserve" -Value 0
+        Set-NcVolOption -Name vol1 -Controller $Array -VserverContext $SVM -Key "try_first" -Value "volume_grow"
+        Set-NcSnapshotAutodelete -Volume ${var.fsxn_volume_name} -Controller $Array -VserverContext $SVM -Key "state" -Value "on"
+        Set-NcSnapshotReserve  -Volume ${var.fsxn_volume_name} -Controller $Array -Percentage 0
+        Set-NcVolAutosize -Name ${var.fsxn_volume_name} -Controller $Array -VserverContext $SVM -Mode grow 
+
         $LunMap = $null
         $LocalIPAddress = Get-NetIPAddress | Where-Object { $_.AddressFamily -eq "IPv4" -and $_.IPAddress -ne "127.0.0.1" }
 
@@ -103,7 +188,7 @@ module "sqlserver" {
         # SQL Data LUN
         $dataLun = (Get-NcLun -Vserver $SVM -Volume vol1 -Path $DataLunPath -ErrorAction Stop)
         if($dataLun -eq $null) {
-          $dataLun = New-NcLun -VserverContext $SVM -Path $DataLunPath -Size $LunSize -OsType "windows"
+          $dataLun = New-NcLun -VserverContext $SVM -Path $DataLunPath -Size $DataLunSize -OsType "windows_2008"
         }
 
         $Lun = Get-NcLun -Path $DataLunPath -Vserver $SVM
@@ -116,7 +201,7 @@ module "sqlserver" {
         # SQL Log LUN
         $logLun = (Get-NcLun -Vserver $SVM -Volume vol1 -Path $LogLunPath -ErrorAction Stop)
         if($logLun -eq $null) {
-          $logLun = New-NcLun -VserverContext $SVM -Path $LogLunPath -Size $LunSize -OsType "windows"
+          $logLun = New-NcLun -VserverContext $SVM -Path $LogLunPath -Size $LogLunSize -OsType "windows_2008"
         }
 
         $Lun = Get-NcLun -Path $LogLunPath -Vserver $SVM
@@ -153,7 +238,7 @@ module "sqlserver" {
               
           $targetFailed = $false                            
           #Establish iSCSI connection 
-          for($count=0; $count -lt 8; $count++){
+          for($count=0; $count -lt $iSCSISessionsPerTarget; $count++){
             Foreach($TargetPortalAddress in $TargetPortalAddresses)
             {
               $target = Get-IscsiTarget | Connect-IscsiTarget -IsMultipathEnabled $true -TargetPortalAddress $TargetPortalAddress -InitiatorPortalAddress $LocaliSCSIAddress -IsPersistent $true 
@@ -168,14 +253,13 @@ module "sqlserver" {
           if($targetFailed) {
             Write-Host "One or more connections to the Target Portal Failed"
           } else {
-            Write-Host "Established 16 connections to the two target portals"
+            Write-Host "Established $iSCSISessionsPerTarget connections to the two target portals"
           }
                                           
           #Set the MPIO Policy to Round Robin 
           Set-MSDSMGlobalDefaultLoadBalancePolicy -Policy RR 
 
           Write-Host "Getting Disks"
-          #Get-Disk | Where-Object { $_.FriendlyName -eq "NETAPP LUN C-Mode" -and $_.OperationalStatus -eq "Offline" } | Format-List
           $disks = Get-Disk | Where-Object { $_.FriendlyName -eq "NETAPP LUN C-Mode" -and $_.OperationalStatus -eq "Offline" } 
           Write-Host "Found NetApp Disks Offline: $(($disks | Measure-Object).Count)"
 
@@ -183,39 +267,12 @@ module "sqlserver" {
 
           foreach( $disk in $disks) {
             if($formatDataDisk) {
-              Set-Disk -UniqueId $disk.UniqueId -IsOffline $false 
-              Set-Disk -UniqueId $disk.UniqueId -IsReadOnly $false 
-                      
-              if($disk.PartitionStyle -ne "MBR") {
-                Initialize-Disk -PartitionStyle MBR -UniqueId $disk.UniqueId
-                New-Partition -DiskId $disk.UniqueId -UseMaximumSize -DriveLetter $DataDirDrive 
-                $NewVol = Format-Volume -DriveLetter $DataDirDrive -FileSystem NTFS -NewFileSystemLabel "SQL Data" -Confirm:$false 
-                        
-                #Initialize-Disk -UniqueId $disk.UniqueId -PartitionStyle MBR -ErrorAction SilentlyContinue
-                #$NewVol = New-Volume -DiskUniqueId $disk.UniqueId -FriendlyName "SQL Data" -DriveLetter $DataDirDrive -ErrorAction SilentlyContinue
-                if($NewVol.HealthStatus -eq "Healthy" -and $NewVol.OperationalStatus -eq "OK") {
-                  Write-Host "New SQL Data Volume is created successfully and operational"
-                }
-              }
-                      
+              CreateDisk -Drive "D:" -DriveLabel "SQL Data" 
               $formatDataDisk = $false
             } 
             else 
             {
-              Set-Disk -UniqueId $disk.UniqueId -IsOffline $false
-              Set-Disk -UniqueId $disk.UniqueId -IsReadOnly $false 
-
-              if($disk.PartitionStyle -ne "MBR") {
-                Initialize-Disk -PartitionStyle MBR -UniqueId $disk.UniqueId
-                New-Partition -DiskId $disk.UniqueId -UseMaximumSize -DriveLetter $LogDirDrive
-                $NewVol = Format-Volume -DriveLetter $LogDirDrive -FileSystem NTFS -NewFileSystemLabel "SQL Log" -Confirm:$false 
-                          
-                #Initialize-Disk -UniqueId $disk.UniqueId -PartitionStyle MBR -ErrorAction SilentlyContinue
-                #$NewVol = New-Volume -DiskUniqueId $disk.UniqueId -FriendlyName "SQL Log" -DriveLetter $LogDirDrive -ErrorAction SilentlyContinue
-                if($NewVol.HealthStatus -eq "Healthy" -and $NewVol.OperationalStatus -eq "OK") {
-                  Write-Host "New SQL Log Volume is created successfully and operational"
-                }
-              }
+              CreateDisk -Drive "E:" -DriveLabel "SQL Log" 
             }
           }
         }
@@ -232,8 +289,6 @@ module "sqlserver" {
 
       # Disable Encryption Warning 
       Set-DbatoolsConfig -Name Import.EncryptionMessageCheck -Value $false -PassThru | Register-DbatoolsConfig
-      
-      # Set the SQL Certificate to be trusted for the Powershell Module
       Set-DbaToolsConfig -fullname 'sql.connection.trustcert' -value $true -Register
 
       $DataVolume = Get-Volume | Where-Object { $_.FileSystemLabel -like "SQL Data"  }
@@ -247,7 +302,6 @@ module "sqlserver" {
       }
 
       if($DataVolume -ne $null) {
-        # Set the Default Path for Data Folder
         $setPathStatus = Set-DbaDefaultPath -SqlInstance "localhost"  -Type Data -Path "$($DataVolume.DriveLetter):" -ErrorAction Continue
         if($setPathStatus.Data -eq "$($DataVolume.DriveLetter):") {
             Write-Host "SQL Default Data Drive is set"
@@ -257,7 +311,6 @@ module "sqlserver" {
       }
       
       if($LogVolume -ne $null) {
-        # Set the Default Path for Log Folder
         $setPathStatus = Set-DbaDefaultPath -SqlInstance "localhost"  -Type Log -Path "$($LogVolume.DriveLetter):" -ErrorAction Continue
         if($setPathStatus.Log -eq "$($LogVolume.DriveLetter):") {
             Write-Host "SQL Default Log Drive is set"
@@ -266,17 +319,17 @@ module "sqlserver" {
         Write-Host "SQL Log Volume not found"
       }
 
-      # Restart the SQL Service
       $ServiceStatus = Restart-DbaService -SqlInstance localhost -WarningAction SilentlyContinue
       if($ServiceStatus.Status -eq "Successful") {
           Write-Host "SQL Server Restarted Successfully"
       }
 
-      # Validate if Paths are set correctly
       $DBObject = Get-DbaDefaultPath -SqlInstance "localhost"
       if($DBObject.Data -eq "$($DataVolume.DriveLetter):" -and $DBObject.Log -eq "$($LogVolume.DriveLetter):") {
           Write-Host "Default Database and Log Paths set correctly"
-      } 
+      }
+
+      InstallSampleDatabase -DataDrive $DataVolume.DriveLetter -LogDrive $LogVolume.DriveLetter
     </powershell>
     <persist>true</persist>
   EOT 
