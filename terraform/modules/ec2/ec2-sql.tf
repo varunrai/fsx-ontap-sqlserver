@@ -289,8 +289,6 @@ module "sqlserver" {
 
       # Disable Encryption Warning 
       Set-DbatoolsConfig -Name Import.EncryptionMessageCheck -Value $false -PassThru | Register-DbatoolsConfig
-      
-      # Set the SQL Certificate to be trusted for the Powershell Module
       Set-DbaToolsConfig -fullname 'sql.connection.trustcert' -value $true -Register
 
       $DataVolume = Get-Volume | Where-Object { $_.FileSystemLabel -like "SQL Data"  }
@@ -304,7 +302,6 @@ module "sqlserver" {
       }
 
       if($DataVolume -ne $null) {
-        # Set the Default Path for Data Folder
         $setPathStatus = Set-DbaDefaultPath -SqlInstance "localhost"  -Type Data -Path "$($DataVolume.DriveLetter):" -ErrorAction Continue
         if($setPathStatus.Data -eq "$($DataVolume.DriveLetter):") {
             Write-Host "SQL Default Data Drive is set"
@@ -314,7 +311,6 @@ module "sqlserver" {
       }
       
       if($LogVolume -ne $null) {
-        # Set the Default Path for Log Folder
         $setPathStatus = Set-DbaDefaultPath -SqlInstance "localhost"  -Type Log -Path "$($LogVolume.DriveLetter):" -ErrorAction Continue
         if($setPathStatus.Log -eq "$($LogVolume.DriveLetter):") {
             Write-Host "SQL Default Log Drive is set"
@@ -323,13 +319,11 @@ module "sqlserver" {
         Write-Host "SQL Log Volume not found"
       }
 
-      # Restart the SQL Service
       $ServiceStatus = Restart-DbaService -SqlInstance localhost -WarningAction SilentlyContinue
       if($ServiceStatus.Status -eq "Successful") {
           Write-Host "SQL Server Restarted Successfully"
       }
 
-      # Validate if Paths are set correctly
       $DBObject = Get-DbaDefaultPath -SqlInstance "localhost"
       if($DBObject.Data -eq "$($DataVolume.DriveLetter):" -and $DBObject.Log -eq "$($LogVolume.DriveLetter):") {
           Write-Host "Default Database and Log Paths set correctly"
