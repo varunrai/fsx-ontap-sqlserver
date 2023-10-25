@@ -14,6 +14,11 @@ module "sqlserver" {
   ami                    = data.aws_ami.windows-sql-server.id
   iam_instance_profile   = var.ec2_iam_role
 
+  root_block_device = {
+    volume_type = "gp2"
+    volume_size = 150
+  }
+
   user_data = <<EOT
     <powershell>
       Write-Host "Starting EC2 Configuration for SQL Server and FSxN"
@@ -31,12 +36,14 @@ module "sqlserver" {
       $DataLunPath = "/vol/${var.fsxn_volume_name}/sqldata"
       $LogLunPath = "/vol/${var.fsxn_volume_name}/sqllog"
       $InitiatorGroup = "SQLServer"
-      $LunSize = "200GB"
+      $DataLunSize = "500GB"
+      $LogLunSize = "500GB"
 
       $iSCSIAddress1 ="${var.fsxn_iscsi_ips[0]}"
       $iSCSIAddress2 = "${var.fsxn_iscsi_ips[1]}"
       $DataDirDrive = "D"
       $LogDirDrive = "E"
+      $iSCSISessionsPerTarget = 4
       
       Write-Host "Installing Nuget Provider"
       if((Get-PackageProvider -Name NuGet -Force).Version -lt "2.8.5.208") {
@@ -83,6 +90,13 @@ module "sqlserver" {
         $Cluster = Get-NcCluster -Controller $Array
 
         $SVM = Get-NcVserver -Controller $Array -Name $SvmName
+
+        Set-NcVolOption -Name vol1 -Controller $Array -VserverContext $SVM -Key "fractional_reserve" -Value 0
+        Set-NcVolOption -Name vol1 -Controller $Array -VserverContext $SVM -Key "try_first" -Value "volume_grow"
+        Set-NcSnapshotAutodelete -Volume ${var.fsxn_volume_name} -Controller $Array -VserverContext $SVM -Key "state" -Value "on"
+        Set-NcSnapshotReserve  -Volume ${var.fsxn_volume_name} -Controller $Array -Percentage 0
+        Set-NcVolAutosize -Name ${var.fsxn_volume_name} -Controller $Array -VserverContext $SVM -Mode grow 
+
         $LunMap = $null
         $LocalIPAddress = Get-NetIPAddress | Where-Object { $_.AddressFamily -eq "IPv4" -and $_.IPAddress -ne "127.0.0.1" }
 
@@ -103,7 +117,7 @@ module "sqlserver" {
         # SQL Data LUN
         $dataLun = (Get-NcLun -Vserver $SVM -Volume vol1 -Path $DataLunPath -ErrorAction Stop)
         if($dataLun -eq $null) {
-          $dataLun = New-NcLun -VserverContext $SVM -Path $DataLunPath -Size $LunSize -OsType "windows"
+          $dataLun = New-NcLun -VserverContext $SVM -Path $DataLunPath -Size $DataLunSize -OsType "windows_2008"
         }
 
         $Lun = Get-NcLun -Path $DataLunPath -Vserver $SVM
@@ -116,7 +130,7 @@ module "sqlserver" {
         # SQL Log LUN
         $logLun = (Get-NcLun -Vserver $SVM -Volume vol1 -Path $LogLunPath -ErrorAction Stop)
         if($logLun -eq $null) {
-          $logLun = New-NcLun -VserverContext $SVM -Path $LogLunPath -Size $LunSize -OsType "windows"
+          $logLun = New-NcLun -VserverContext $SVM -Path $LogLunPath -Size $LogLunSize -OsType "windows_2008"
         }
 
         $Lun = Get-NcLun -Path $LogLunPath -Vserver $SVM
@@ -153,7 +167,7 @@ module "sqlserver" {
               
           $targetFailed = $false                            
           #Establish iSCSI connection 
-          for($count=0; $count -lt 8; $count++){
+          for($count=0; $count -lt $iSCSISessionsPerTarget; $count++){
             Foreach($TargetPortalAddress in $TargetPortalAddresses)
             {
               $target = Get-IscsiTarget | Connect-IscsiTarget -IsMultipathEnabled $true -TargetPortalAddress $TargetPortalAddress -InitiatorPortalAddress $LocaliSCSIAddress -IsPersistent $true 
