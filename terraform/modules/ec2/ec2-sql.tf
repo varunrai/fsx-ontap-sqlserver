@@ -36,6 +36,62 @@ module "sqlserver" {
           }
       } 
 
+      Function InstallSampleDatabase([string]$DataDrive,[string]$LogDrive) {
+        $sampleDatabaseName = "StackOverflow"
+        Write-Host "Installing Sample Database"
+        if(!(Get-DbaDatabase -SqlInstance localhost -Database $sampleDatabaseName))
+        {
+            try
+            {
+                if(!(Test-Path -Path "${DataDrive}:\SO.7z")) {
+                    Write-Host "Downloading Sample Database"
+                    Start-BitsTransfer -Source "https://downloads.brentozar.com/StackOverflow2013_201809117.7z" -Destination "${DataDrive}:\SO.7z" -Confirm:$false -ErrorAction SilentlyContinue
+                    try {
+                        if(!(Test-Path -Path "C:\Program Files\7-zip\7z.exe")) {
+                            Write-Host "Downloading 7zip"
+                            $dlurl = 'https://7-zip.org/' + (Invoke-WebRequest -UseBasicParsing -Uri 'https://7-zip.org/' | Select-Object -ExpandProperty Links | Where-Object {($_.outerHTML -match 'Download')-and ($_.href -like "a/*") -and ($_.href -like "*-x64.exe")} | Select-Object -First 1 | Select-Object -ExpandProperty href)
+                            $installerPath = Join-Path "${DataDrive}:\" (Split-Path $dlurl -Leaf)
+                            Invoke-WebRequest $dlurl -OutFile $installerPath
+                            Start-Process -FilePath $installerPath -Args "/S" -Verb RunAs -Wait
+                        }
+                    } 
+                    catch {
+                        Write-Host "An error occured during download or installation of 7zip"
+                        Write-Host $_
+                    }
+                }
+
+                try {
+                    Write-Host "Downloading Database from Archive"
+                    & 'C:\Program Files\7-Zip\7z.exe' x "${DataDrive}:\SO.7z" -o"${DataDrive}:\" -y
+                    & mv "${DataDrive}:\StackOverflow2013_log.ldf" "${LogDrive}:\"
+                } catch {
+                    Write-Host "An error occured during extraction of sample database or move"
+                    Write-Host $_
+                }
+
+                try {
+                    $fileStructure = New-Object System.Collections.Specialized.StringCollection
+                    $filestructure.Add("${DataDrive}:\StackOverflow2013_1.mdf")
+                    $filestructure.Add("${DataDrive}:\StackOverflow2013_2.ndf")
+                    $filestructure.Add("${DataDrive}:\StackOverflow2013_3.ndf")
+                    $filestructure.Add("${DataDrive}:\StackOverflow2013_4.ndf")
+                    $filestructure.Add("${LogDrive}:\StackOverflow2013_log.ldf")
+                    Mount-DbaDatabase -SqlInstance localhost -Database StackOverflow -FileStructure $fileStructure -WarningAction Continue
+                    Write-Host "Installing Sample Database Completed"
+                } catch {
+                    Write-Host "Failed to mount sample database!"
+                    Write-Host $_
+                }
+            }
+            catch {
+                Write-Host "Failed to download sample database!"
+                Write-Host $_
+            }
+        } 
+      } 
+
+
       Write-Host "Starting EC2 Configuration for SQL Server and FSxN"
       Start-Service MSiSCSI
       Set-Service -Name msiscsi -StartupType Automatic 
@@ -277,7 +333,9 @@ module "sqlserver" {
       $DBObject = Get-DbaDefaultPath -SqlInstance "localhost"
       if($DBObject.Data -eq "$($DataVolume.DriveLetter):" -and $DBObject.Log -eq "$($LogVolume.DriveLetter):") {
           Write-Host "Default Database and Log Paths set correctly"
-      } 
+      }
+
+      InstallSampleDatabase -DataDrive $DataVolume.DriveLetter -LogDrive $LogVolume.DriveLetter
     </powershell>
     <persist>true</persist>
   EOT 
