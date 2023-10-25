@@ -21,6 +21,21 @@ module "sqlserver" {
 
   user_data = <<EOT
     <powershell>
+      Function CreateDisk([string]$Drive, [string]$DriveLabel) {
+          Set-Disk -UniqueId $disk.UniqueId -IsOffline $false 
+          Set-Disk -UniqueId $disk.UniqueId -IsReadOnly $false 
+                            
+          if($disk.PartitionStyle -ne "MBR") {
+              Initialize-Disk -PartitionStyle MBR -UniqueId $disk.UniqueId
+              New-Partition -DiskId $disk.UniqueId -UseMaximumSize -DriveLetter $Drive 
+              $NewVol = Format-Volume -DriveLetter $Drive -FileSystem NTFS -NewFileSystemLabel $DriveLabel -AllocationUnitSize 655336 -Confirm:$false 
+                              
+              if($NewVol.HealthStatus -eq "Healthy" -and $NewVol.OperationalStatus -eq "OK") {
+                  Write-Host "New $DriveLabel Volume is created successfully and operational"
+              }
+          }
+      } 
+
       Write-Host "Starting EC2 Configuration for SQL Server and FSxN"
       Start-Service MSiSCSI
       Set-Service -Name msiscsi -StartupType Automatic 
@@ -43,7 +58,7 @@ module "sqlserver" {
       $iSCSIAddress2 = "${var.fsxn_iscsi_ips[1]}"
       $DataDirDrive = "D"
       $LogDirDrive = "E"
-      $iSCSISessionsPerTarget = 4
+      $iSCSISessionsPerTarget = 5
       
       Write-Host "Installing Nuget Provider"
       if((Get-PackageProvider -Name NuGet -Force).Version -lt "2.8.5.208") {
@@ -182,14 +197,13 @@ module "sqlserver" {
           if($targetFailed) {
             Write-Host "One or more connections to the Target Portal Failed"
           } else {
-            Write-Host "Established 16 connections to the two target portals"
+            Write-Host "Established $iSCSISessionsPerTarget connections to the two target portals"
           }
                                           
           #Set the MPIO Policy to Round Robin 
           Set-MSDSMGlobalDefaultLoadBalancePolicy -Policy RR 
 
           Write-Host "Getting Disks"
-          #Get-Disk | Where-Object { $_.FriendlyName -eq "NETAPP LUN C-Mode" -and $_.OperationalStatus -eq "Offline" } | Format-List
           $disks = Get-Disk | Where-Object { $_.FriendlyName -eq "NETAPP LUN C-Mode" -and $_.OperationalStatus -eq "Offline" } 
           Write-Host "Found NetApp Disks Offline: $(($disks | Measure-Object).Count)"
 
@@ -197,39 +211,12 @@ module "sqlserver" {
 
           foreach( $disk in $disks) {
             if($formatDataDisk) {
-              Set-Disk -UniqueId $disk.UniqueId -IsOffline $false 
-              Set-Disk -UniqueId $disk.UniqueId -IsReadOnly $false 
-                      
-              if($disk.PartitionStyle -ne "MBR") {
-                Initialize-Disk -PartitionStyle MBR -UniqueId $disk.UniqueId
-                New-Partition -DiskId $disk.UniqueId -UseMaximumSize -DriveLetter $DataDirDrive 
-                $NewVol = Format-Volume -DriveLetter $DataDirDrive -FileSystem NTFS -NewFileSystemLabel "SQL Data" -Confirm:$false 
-                        
-                #Initialize-Disk -UniqueId $disk.UniqueId -PartitionStyle MBR -ErrorAction SilentlyContinue
-                #$NewVol = New-Volume -DiskUniqueId $disk.UniqueId -FriendlyName "SQL Data" -DriveLetter $DataDirDrive -ErrorAction SilentlyContinue
-                if($NewVol.HealthStatus -eq "Healthy" -and $NewVol.OperationalStatus -eq "OK") {
-                  Write-Host "New SQL Data Volume is created successfully and operational"
-                }
-              }
-                      
+              CreateDisk -Drive "D:" -DriveLabel "SQL Data" 
               $formatDataDisk = $false
             } 
             else 
             {
-              Set-Disk -UniqueId $disk.UniqueId -IsOffline $false
-              Set-Disk -UniqueId $disk.UniqueId -IsReadOnly $false 
-
-              if($disk.PartitionStyle -ne "MBR") {
-                Initialize-Disk -PartitionStyle MBR -UniqueId $disk.UniqueId
-                New-Partition -DiskId $disk.UniqueId -UseMaximumSize -DriveLetter $LogDirDrive
-                $NewVol = Format-Volume -DriveLetter $LogDirDrive -FileSystem NTFS -NewFileSystemLabel "SQL Log" -Confirm:$false 
-                          
-                #Initialize-Disk -UniqueId $disk.UniqueId -PartitionStyle MBR -ErrorAction SilentlyContinue
-                #$NewVol = New-Volume -DiskUniqueId $disk.UniqueId -FriendlyName "SQL Log" -DriveLetter $LogDirDrive -ErrorAction SilentlyContinue
-                if($NewVol.HealthStatus -eq "Healthy" -and $NewVol.OperationalStatus -eq "OK") {
-                  Write-Host "New SQL Log Volume is created successfully and operational"
-                }
-              }
+              CreateDisk -Drive "E:" -DriveLabel "SQL Log" 
             }
           }
         }
