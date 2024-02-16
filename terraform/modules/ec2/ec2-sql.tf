@@ -1,3 +1,7 @@
+locals {
+  server_name = "${var.creator_tag}_SQL_Demo"
+}
+
 module "sqlserver" {
   source  = "terraform-aws-modules/ec2-instance/aws"
   version = "5.2.1"
@@ -21,14 +25,14 @@ module "sqlserver" {
 
   user_data = <<EOT
     <powershell>
-      Function CreateDisk([string]$Drive, [string]$DriveLabel) {
+       Function CreateDisk([string]$Drive, [string]$DriveLabel) {
           Set-Disk -UniqueId $disk.UniqueId -IsOffline $false 
           Set-Disk -UniqueId $disk.UniqueId -IsReadOnly $false 
                             
           if($disk.PartitionStyle -ne "MBR") {
               Initialize-Disk -PartitionStyle MBR -UniqueId $disk.UniqueId
               New-Partition -DiskId $disk.UniqueId -UseMaximumSize -DriveLetter $Drive 
-              $NewVol = Format-Volume -DriveLetter $Drive -FileSystem NTFS -NewFileSystemLabel $DriveLabel -AllocationUnitSize 655336 -Confirm:$false 
+              $NewVol = Format-Volume -DriveLetter $Drive -FileSystem NTFS -NewFileSystemLabel $DriveLabel -AllocationUnitSize 65536 -Confirm:$false 
                               
               if($NewVol.HealthStatus -eq "Healthy" -and $NewVol.OperationalStatus -eq "OK") {
                   Write-Host "New $DriveLabel Volume is created successfully and operational"
@@ -39,18 +43,20 @@ module "sqlserver" {
       Function InstallSampleDatabase([string]$DataDrive,[string]$LogDrive) {
         $sampleDatabaseName = "StackOverflow"
         Write-Host "Installing Sample Database"
+        Set-DbatoolsConfig -Name Import.EncryptionMessageCheck -Value $false -PassThru | Register-DbatoolsConfig
+        Set-DbaToolsConfig -fullname 'sql.connection.trustcert' -value $true -Register
         if(!(Get-DbaDatabase -SqlInstance localhost -Database $sampleDatabaseName))
         {
             try
             {
-                if(!(Test-Path -Path "${DataDrive}:\SO.7z")) {
+                if(!(Test-Path -Path $DataDrive":\SO.7z")) {
                     Write-Host "Downloading Sample Database"
-                    Start-BitsTransfer -Source "https://downloads.brentozar.com/StackOverflow2013_201809117.7z" -Destination "${DataDrive}:\SO.7z" -Confirm:$false -ErrorAction SilentlyContinue
+                    Start-BitsTransfer -Source "https://downloads.brentozar.com/StackOverflow2013_201809117.7z" -Destination $DataDrive":\SO.7z" -Confirm:$false -ErrorAction SilentlyContinue
                     try {
                         if(!(Test-Path -Path "C:\Program Files\7-zip\7z.exe")) {
                             Write-Host "Downloading 7zip"
                             $dlurl = 'https://7-zip.org/' + (Invoke-WebRequest -UseBasicParsing -Uri 'https://7-zip.org/' | Select-Object -ExpandProperty Links | Where-Object {($_.outerHTML -match 'Download')-and ($_.href -like "a/*") -and ($_.href -like "*-x64.exe")} | Select-Object -First 1 | Select-Object -ExpandProperty href)
-                            $installerPath = Join-Path "${DataDrive}:\" (Split-Path $dlurl -Leaf)
+                            $installerPath = Join-Path $DataDrive":\" (Split-Path $dlurl -Leaf)
                             Invoke-WebRequest $dlurl -OutFile $installerPath
                             Start-Process -FilePath $installerPath -Args "/S" -Verb RunAs -Wait
                         }
@@ -63,8 +69,10 @@ module "sqlserver" {
 
                 try {
                     Write-Host "Downloading Database from Archive"
-                    & 'C:\Program Files\7-Zip\7z.exe' x "${DataDrive}:\SO.7z" -o"${DataDrive}:\" -y
-                    & mv "${DataDrive}:\StackOverflow2013_log.ldf" "${LogDrive}:\"
+                    $zipFile = $DataDrive + ":\SO.7z"
+                    $outputDrive = $DataDrive + ":\"
+                    Start-Process -FilePath 'C:\Program Files\7-Zip\7z.exe' -ArgumentList @("x", $zipFile, "-o$outputDrive", "-y") -Verb RunAs -Wait 
+                    & mv $DataDrive":\StackOverflow2013_log.ldf" $LogDrive":\"
                 } catch {
                     Write-Host "An error occured during extraction of sample database or move"
                     Write-Host $_
@@ -72,11 +80,11 @@ module "sqlserver" {
 
                 try {
                     $fileStructure = New-Object System.Collections.Specialized.StringCollection
-                    $filestructure.Add("${DataDrive}:\StackOverflow2013_1.mdf")
-                    $filestructure.Add("${DataDrive}:\StackOverflow2013_2.ndf")
-                    $filestructure.Add("${DataDrive}:\StackOverflow2013_3.ndf")
-                    $filestructure.Add("${DataDrive}:\StackOverflow2013_4.ndf")
-                    $filestructure.Add("${LogDrive}:\StackOverflow2013_log.ldf")
+                    $filestructure.Add($DataDrive + ":\StackOverflow2013_1.mdf")
+                    $filestructure.Add($DataDrive + ":\StackOverflow2013_2.ndf")
+                    $filestructure.Add($DataDrive + ":\StackOverflow2013_3.ndf")
+                    $filestructure.Add($DataDrive + ":\StackOverflow2013_4.ndf")
+                    $filestructure.Add($LogDrive + ":\StackOverflow2013_log.ldf")
                     Mount-DbaDatabase -SqlInstance localhost -Database StackOverflow -FileStructure $fileStructure -WarningAction Continue
                     Write-Host "Installing Sample Database Completed"
                 } catch {
@@ -104,11 +112,13 @@ module "sqlserver" {
       $Pass = ConvertTo-SecureString "$($ssmPass)" -AsPlainText -Force 
 
       $SvmName = "${var.fsxn_svm}"
-      $DataLunPath = "/vol/${var.fsxn_volume_name}/sqldata"
-      $LogLunPath = "/vol/${var.fsxn_volume_name}/sqllog"
+      $DataVolName = "${aws_fsx_ontap_volume.fsxn_sql_data_volume.name}"
+      $LogVolName = "${aws_fsx_ontap_volume.fsxn_sql_log_volume.name}"
+      $DataLunPath = "/vol/${aws_fsx_ontap_volume.fsxn_sql_data_volume.name}/sqldata"
+      $LogLunPath = "/vol/${aws_fsx_ontap_volume.fsxn_sql_log_volume.name}/sqllog"
       $InitiatorGroup = "SQLServer"
-      $DataLunSize = "500GB"
-      $LogLunSize = "500GB"
+      $DataLunSize = "2TB"
+      $LogLunSize = "1TB"
 
       $iSCSIAddress1 ="${var.fsxn_iscsi_ips[0]}"
       $iSCSIAddress2 = "${var.fsxn_iscsi_ips[1]}"
@@ -162,11 +172,17 @@ module "sqlserver" {
 
         $SVM = Get-NcVserver -Controller $Array -Name $SvmName
 
-        Set-NcVolOption -Name vol1 -Controller $Array -VserverContext $SVM -Key "fractional_reserve" -Value 0
-        Set-NcVolOption -Name vol1 -Controller $Array -VserverContext $SVM -Key "try_first" -Value "volume_grow"
-        Set-NcSnapshotAutodelete -Volume ${var.fsxn_volume_name} -Controller $Array -VserverContext $SVM -Key "state" -Value "on"
-        Set-NcSnapshotReserve  -Volume ${var.fsxn_volume_name} -Controller $Array -Percentage 0
-        Set-NcVolAutosize -Name ${var.fsxn_volume_name} -Controller $Array -VserverContext $SVM -Mode grow 
+        Set-NcVolOption -Name $DataVolName -Controller $Array -VserverContext $SVM -Key "fractional_reserve" -Value 0
+        Set-NcVolOption -Name $DataVolName -Controller $Array -VserverContext $SVM -Key "try_first" -Value "volume_grow"
+        Set-NcSnapshotAutodelete -Volume $DataVolName -Controller $Array -VserverContext $SVM -Key "state" -Value "on"
+        Set-NcSnapshotReserve  -Volume $DataVolName -Percentage 0 -Controller $Array -VserverContext $SVM
+        Set-NcVolAutosize -Name $DataVolName -Controller $Array -VserverContext $SVM -Mode grow 
+
+        Set-NcVolOption -Name $LogVolName -Controller $Array -VserverContext $SVM -Key "fractional_reserve" -Value 0
+        Set-NcVolOption -Name $LogVolName -Controller $Array -VserverContext $SVM -Key "try_first" -Value "volume_grow"
+        Set-NcSnapshotAutodelete -Volume $LogVolName -Controller $Array -VserverContext $SVM -Key "state" -Value "on"
+        Set-NcSnapshotReserve  -Volume $LogVolName -Percentage 0 -Controller $Array -VserverContext $SVM
+        Set-NcVolAutosize -Name $LogVolName -Controller $Array -VserverContext $SVM -Mode grow 
 
         $LunMap = $null
         $LocalIPAddress = Get-NetIPAddress | Where-Object { $_.AddressFamily -eq "IPv4" -and $_.IPAddress -ne "127.0.0.1" }
@@ -186,7 +202,7 @@ module "sqlserver" {
         } 
 
         # SQL Data LUN
-        $dataLun = (Get-NcLun -Vserver $SVM -Volume vol1 -Path $DataLunPath -ErrorAction Stop)
+        $dataLun = (Get-NcLun -Vserver $SVM -Volume $DataVolName -Path $DataLunPath -ErrorAction Stop)
         if($dataLun -eq $null) {
           $dataLun = New-NcLun -VserverContext $SVM -Path $DataLunPath -Size $DataLunSize -OsType "windows_2008"
         }
@@ -199,7 +215,7 @@ module "sqlserver" {
         }
 
         # SQL Log LUN
-        $logLun = (Get-NcLun -Vserver $SVM -Volume vol1 -Path $LogLunPath -ErrorAction Stop)
+        $logLun = (Get-NcLun -Vserver $SVM -Volume $LogVolName -Path $LogLunPath -ErrorAction Stop)
         if($logLun -eq $null) {
           $logLun = New-NcLun -VserverContext $SVM -Path $LogLunPath -Size $LogLunSize -OsType "windows_2008"
         }
@@ -267,12 +283,12 @@ module "sqlserver" {
 
           foreach( $disk in $disks) {
             if($formatDataDisk) {
-              CreateDisk -Drive "D:" -DriveLabel "SQL Data" 
+              CreateDisk -Drive $DataDirDrive -DriveLabel "SQL Data" 
               $formatDataDisk = $false
             } 
             else 
             {
-              CreateDisk -Drive "E:" -DriveLabel "SQL Log" 
+              CreateDisk -Drive $LogDirDrive -DriveLabel "SQL Log" 
             }
           }
         }
