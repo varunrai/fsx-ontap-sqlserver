@@ -1,7 +1,17 @@
-variable "sql_instance_type" {
+variable "ec2_instance_type" {
   description = "EC2 Instance Type for SQL Server"
   type        = string
   default     = "t3.2xlarge"
+}
+
+variable "ec2_instance_name" {
+  description = "EC2 Instance Name"
+  type        = string
+}
+
+variable "ec2_instance_key_pair" {
+  description = "EC2 Instance Key Pair Name"
+  type        = string
 }
 
 variable "ec2_iam_role" {
@@ -27,9 +37,12 @@ variable "fsxn_svm" {
   default     = "svm01"
 }
 
-variable "fsxn_volume_name" {
-  description = "FSxN Volume Name"
-  type        = string
+variable "fsxn_sql_log_volume" {
+  description = "FSxN SQL Data Volume"
+}
+
+variable "fsxn_sql_data_volume" {
+  description = "FSxN SQL Log Volume"
 }
 
 variable "fsxn_management_ip" {
@@ -37,18 +50,39 @@ variable "fsxn_management_ip" {
   type        = list(string)
 }
 
-variable "instance_keypair" {
-  description = "Value of the instance key pair"
+variable "ec2_subnet_id" {
+  description = "Subnet Id for EC2 Instance"
   type        = string
 }
 
-variable "sql_subnet_id" {
-  description = "Subnet Id for EC2 Instances"
+variable "sql_data_volume_drive_letter" {
+  description = "SQL Data Volume Drive Letter"
   type        = string
+
+  validation {
+    condition     = can(regex("^[D-Z]{1}$", var.sql_data_volume_drive_letter))
+    error_message = "Must be single letter between D and Z."
+  }
 }
 
-variable "security_groups_ids" {
-  description = "Security Groups for EC2 Instances"
+variable "sql_log_volume_drive_letter" {
+  description = "SQL Log Volume Drive Letter"
+  type        = string
+
+  validation {
+    condition     = can(regex("^[D-Z]{1}$", var.sql_log_volume_drive_letter))
+    error_message = "Must be single letter between D and Z."
+  }
+}
+
+variable "sql_install_sample_database" {
+  description = "Install Sample StackOverflow Database"
+  type        = bool
+  default     = false
+}
+
+variable "ec2_security_groups_ids" {
+  description = "Security Groups for EC2 Instance"
   type        = list(string)
 }
 
