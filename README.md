@@ -281,7 +281,8 @@ You can see that Terraform recognizes the modules required by our configuration:
     private_subnets_cidr  = ["10.0.128.0/20", "10.0.144.0/20"]
   ```
 
-> [!IMPORTANT] > **Make sure to replace the values with ones that match your AWS environment and needs.**
+> [!IMPORTANT] 
+> **Make sure to replace the values with ones that match your AWS environment and needs.**
 
 #### 5. Create a Terraform plan
 
