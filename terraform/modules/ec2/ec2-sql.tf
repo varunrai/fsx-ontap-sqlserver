@@ -1,3 +1,7 @@
+locals {
+  server_name = "${var.creator_tag}_SQL_Demo"
+}
+
 module "sqlserver" {
   source  = "terraform-aws-modules/ec2-instance/aws"
   version = "5.2.1"
