@@ -9,7 +9,6 @@ The sample terraform deployment will create a Single-AZ Amazon FSx for NetApp ON
 - [Prerequisites](#prerequisites)
 - [Usage](#usage)
 - [Author Information](#author-information)
-- [License](#license)
 
 ## Introduction
 
@@ -86,7 +85,7 @@ The terraform deployment creates the following components:
 - NAT Gateway
 - Security Groups for the File System and EC2
 - Amazon FSx for NetApp ONTAP file system with 1 SVM and 2 Volumes for SQL Data and Log
-- EC2 Instance with SQL Server (see [EC2 Configuration section for more details](#EC2Configuration))
+- EC2 Instance with SQL Server (see [EC2 Configuration section for more details](#ec2-configuration))
 
 #### EC2 Configuration
 
