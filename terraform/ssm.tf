@@ -1,5 +1,5 @@
 resource "aws_ssm_parameter" "fsxpassword" {
-  name        = "/fsxn/password/fsxnadmin"
+  name        = "/fsxn/password/fsxadmin"
   description = "FSxN Admin Password"
   type        = "SecureString"
   value       = var.fsxn_password

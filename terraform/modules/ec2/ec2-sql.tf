@@ -1,27 +1,15 @@
-locals {
-  server_name = "${var.creator_tag}_SQL_Demo"
-}
-
 module "sqlserver" {
   source  = "terraform-aws-modules/ec2-instance/aws"
   version = "5.2.1"
 
-  for_each = toset(["Demo"])
-
-  name = "${var.creator_tag}-SQL-${each.key}"
-
-  instance_type          = var.sql_instance_type
-  key_name               = var.instance_keypair
-  monitoring             = true
-  vpc_security_group_ids = var.security_groups_ids
-  subnet_id              = var.sql_subnet_id
-  ami                    = data.aws_ami.windows-sql-server.id
+  name                   = var.ec2_instance_name
+  instance_type          = var.ec2_instance_type
+  subnet_id              = var.ec2_subnet_id
+  key_name               = var.ec2_instance_key_pair
+  vpc_security_group_ids = var.ec2_security_groups_ids
   iam_instance_profile   = var.ec2_iam_role
-
-  root_block_device = {
-    volume_type = "gp2"
-    volume_size = 150
-  }
+  monitoring             = false
+  ami                    = data.aws_ami.windows-sql-server.id
 
   user_data = <<EOT
     <powershell>
@@ -108,22 +96,23 @@ module "sqlserver" {
       $ManagementIP = "${var.fsxn_management_ip[0]}"
       $OntapArray = @($ManagementIP)
       $User = "${var.fsxn_admin_user}"
-      $ssmPass = (Get-SSMParameterValue -Name /fsxn/password/fsxnadmin -WithDecryption 1).Parameters.Value 
+      $ssmPass = (Get-SSMParameterValue -Name /fsxn/password/fsxadmin -WithDecryption 1).Parameters.Value 
       $Pass = ConvertTo-SecureString "$($ssmPass)" -AsPlainText -Force 
 
       $SvmName = "${var.fsxn_svm}"
-      $DataVolName = "${aws_fsx_ontap_volume.fsxn_sql_data_volume.name}"
-      $LogVolName = "${aws_fsx_ontap_volume.fsxn_sql_log_volume.name}"
-      $DataLunPath = "/vol/${aws_fsx_ontap_volume.fsxn_sql_data_volume.name}/sqldata"
-      $LogLunPath = "/vol/${aws_fsx_ontap_volume.fsxn_sql_log_volume.name}/sqllog"
+      $DataVolName = "${var.fsxn_sql_data_volume.name}"
+      $LogVolName = "${var.fsxn_sql_log_volume.name}"
+      $DataLunPath = "/vol/${var.fsxn_sql_data_volume.name}/sqldata"
+      $LogLunPath = "/vol/${var.fsxn_sql_log_volume.name}/sqllog"
       $InitiatorGroup = "SQLServer"
-      $DataLunSize = "2TB"
-      $LogLunSize = "1TB"
+      $DataLunSize = "400GB"
+      $LogLunSize = "200GB"
+      $InstallSampleDB = [System.Convert]::ToBoolean("${var.sql_install_sample_database}")
 
       $iSCSIAddress1 ="${var.fsxn_iscsi_ips[0]}"
       $iSCSIAddress2 = "${var.fsxn_iscsi_ips[1]}"
-      $DataDirDrive = "D"
-      $LogDirDrive = "E"
+      $DataDirDrive = "${var.sql_data_volume_drive_letter}"
+      $LogDirDrive = "${var.sql_log_volume_drive_letter}"
       $iSCSISessionsPerTarget = 5
       
       Write-Host "Installing Nuget Provider"
@@ -134,15 +123,15 @@ module "sqlserver" {
       
       Write-Host "Checking if DBA Tools are installed"
       $DBATools = Get-Module dbatools -ListAvailable -Refresh
-      if($DBATools -eq $null) {
+      if(!$DBATools) {
           Write-Host "Installing DBA Tools"
           (Install-Module dbatools -Force)
       }
       Write-Host "DBA Tools Installed"
 
-      Write-Host "Checking if NetApp.ONTAP Powershell is installed"
+      Write-Host "Checking NetApp.ONTAP Powershell is installed"
       $ONTAPModule = Get-Module NetApp.ONTAP -ListAvailable -Refresh
-      if($ONTAPModule -eq $null) {
+      if(!$ONTAPModule) {
         Write-Host "Installing NetApp.ONTAP Powershell Module"
         Install-Module -Name NetApp.ONTAP -RequiredVersion 9.12.1.2302 -SkipPublisherCheck -Confirm:$false  -Repository PSGallery -Force
       } 
@@ -160,7 +149,7 @@ module "sqlserver" {
         $PreCheckDataDisks = (Get-Disk | Where-Object { $_.FriendlyName -eq "NETAPP LUN C-Mode" -and $_.OperationalStatus -eq "Online" })
         $PreCheckDataVolume = (Get-Volume | Where-Object { $_.FileSystemLabel -eq "SQL Data" })
         $PreCheckLogVolume = (Get-Volume | Where-Object { $_.FileSystemLabel -eq "SQL Log" })
-        if($PreCheckDataDisks -ne $null -and $PreCheckDataVolume -ne $null -and $PreCheckLogVolume -ne $null) {
+        if($PreCheckDataDisks -and $PreCheckDataVolume -and $PreCheckLogVolume) {
           Write-Host "SQL Data and Log Disks are already mounted"
           Write-Host "Exiting the script."
           exit
@@ -188,12 +177,12 @@ module "sqlserver" {
         $LocalIPAddress = Get-NetIPAddress | Where-Object { $_.AddressFamily -eq "IPv4" -and $_.IPAddress -ne "127.0.0.1" }
 
         $IGroup = (Get-NcIGroup -Name $InitiatorGroup -VserverContext $SVM)
-        if($IGroup -eq $null) {
+        if(!$IGroup) {
           $IGroup = New-NcIgroup -Name $InitiatorGroup -VserverContext $SVM -Protocol iscsi -Type "windows"
         }
 
         $IqnObj = (Get-NcIGroup -Initiator $IQN -VserverContext $SVM)
-        if($IqnObj -eq $null) {
+        if(!$IqnObj) {
           $iqnCount = $IqnObj.Initiators | Where-Object { $_.InitiatorName -eq $IQN } | Measure-Object
 
           if($iqnCount.Count -eq 0) {
@@ -201,33 +190,28 @@ module "sqlserver" {
           }
         } 
 
-        # SQL Data LUN
+        # SQL Data and Log LUNs
         $dataLun = (Get-NcLun -Vserver $SVM -Volume $DataVolName -Path $DataLunPath -ErrorAction Stop)
-        if($dataLun -eq $null) {
+        if(!$dataLun) {
           $dataLun = New-NcLun -VserverContext $SVM -Path $DataLunPath -Size $DataLunSize -OsType "windows_2008"
         }
-
         $Lun = Get-NcLun -Path $DataLunPath -Vserver $SVM
         $LunMap = Get-NcLunMap -VserverContext $SVM -Path $DataLunPath -ErrorAction Stop 
-
-        if($LunMap -eq $null) {
+        if(!$LunMap) {
           $LunMap = Add-NcLunMap -InitiatorGroupName $InitiatorGroup -VserverContext $SVM -Path $DataLunPath
         }
 
-        # SQL Log LUN
         $logLun = (Get-NcLun -Vserver $SVM -Volume $LogVolName -Path $LogLunPath -ErrorAction Stop)
-        if($logLun -eq $null) {
+        if(!$logLun) {
           $logLun = New-NcLun -VserverContext $SVM -Path $LogLunPath -Size $LogLunSize -OsType "windows_2008"
         }
-
         $Lun = Get-NcLun -Path $LogLunPath -Vserver $SVM
         $LunMap = Get-NcLunMap -VserverContext $SVM -Path $LogLunPath -ErrorAction Stop
-
-        if($LunMap -eq $null) {
+        if(!$LunMap) {
           $LunMap = Add-NcLunMap -InitiatorGroupName $InitiatorGroup -VserverContext $SVM -Path $LogLunPath
         } 
 
-        if($LunMap -ne $null) {
+        if($LunMap) {
           #iSCSI IP addresses for Preferred and Standby subnets 
           $TargetPortalAddresses = @($iSCSIAddress1,$iSCSIAddress2) 
                                           
@@ -237,7 +221,7 @@ module "sqlserver" {
           #Connect to FSx for NetApp ONTAP file system 
           Foreach ($TargetPortalAddress in $TargetPortalAddresses) { 
             $targetPortal =  New-IscsiTargetPortal -TargetPortalAddress $TargetPortalAddress -TargetPortalPortNumber 3260 -InitiatorPortalAddress $LocaliSCSIAddress 
-            if($targetPortal -ne $null) {
+            if($targetPortal) {
               Write-Host "Created a new iSCSI Target Portal: $($TargetPortalAddress)"
             } else {
               Write-Host "Failed to create a new iSCSI Target Portal: $($TargetPortalAddress)"
@@ -246,12 +230,11 @@ module "sqlserver" {
                                           
           #Add MPIO support for iSCSI 
           $mpioSupportedHW = New-MSDSMSupportedHW -VendorId MSFT2005 -ProductId iSCSIBusType_0x9 
-          if($mpioSupportedHW -eq $null) {
+          if(!$mpioSupportedHW) {
             Write-Host "Failed to add MPIO support"
           }
                             
-          Write-Host "Establishing 8 connections per target portal"
-              
+          Write-Host "Establishing multiple connections per target portal"              
           $targetFailed = $false                            
           #Establish iSCSI connection 
           for($count=0; $count -lt $iSCSISessionsPerTarget; $count++){
@@ -317,7 +300,7 @@ module "sqlserver" {
           exit
       }
 
-      if($DataVolume -ne $null) {
+      if($DataVolume) {
         $setPathStatus = Set-DbaDefaultPath -SqlInstance "localhost"  -Type Data -Path "$($DataVolume.DriveLetter):" -ErrorAction Continue
         if($setPathStatus.Data -eq "$($DataVolume.DriveLetter):") {
             Write-Host "SQL Default Data Drive is set"
@@ -326,7 +309,7 @@ module "sqlserver" {
         Write-Host "SQL Data Volume not found"
       }
       
-      if($LogVolume -ne $null) {
+      if($LogVolume) {
         $setPathStatus = Set-DbaDefaultPath -SqlInstance "localhost"  -Type Log -Path "$($LogVolume.DriveLetter):" -ErrorAction Continue
         if($setPathStatus.Log -eq "$($LogVolume.DriveLetter):") {
             Write-Host "SQL Default Log Drive is set"
@@ -344,8 +327,9 @@ module "sqlserver" {
       if($DBObject.Data -eq "$($DataVolume.DriveLetter):" -and $DBObject.Log -eq "$($LogVolume.DriveLetter):") {
           Write-Host "Default Database and Log Paths set correctly"
       }
-
-      InstallSampleDatabase -DataDrive $DataVolume.DriveLetter -LogDrive $LogVolume.DriveLetter
+      if($InstallSampleDB) {
+        InstallSampleDatabase -DataDrive $DataVolume.DriveLetter -LogDrive $LogVolume.DriveLetter
+      }
     </powershell>
     <persist>true</persist>
   EOT 
